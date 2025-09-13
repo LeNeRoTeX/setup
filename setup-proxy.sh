@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent setup of nginx-proxy + acme-companion using named volumes & a dedicated network.
-# Requires a contact email for Let's Encrypt notifications; prompts via /dev/tty when piped.
+# Requires a contact email for Let's Encrypt; prompts via /dev/tty (works even when piped).
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -21,28 +21,26 @@ NAME_PROXY="nginx-proxy"
 NAME_ACME="nginx-proxy-acme"
 
 # ---- sanity: docker available ----
-if ! command -v docker >/dev/null 2>&1; then
-  err "Docker is required but not found."
-  exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-  err "Docker daemon not responding."
-  exit 1
-fi
+command -v docker >/dev/null 2>&1 || { err "Docker is required but not found."; exit 1; }
+docker info >/dev/null 2>&1 || { err "Docker daemon not responding."; exit 1; }
 
 # ---- email handling (prompt via /dev/tty if needed) ----
+EMAIL=""                                 # initialize so set -u can't trip
+: "${LETSENCRYPT_EMAIL:=}"               # define (possibly empty) to satisfy -u
+EMAIL="${LETSENCRYPT_EMAIL}"
+
+trim() { awk '{$1=$1; print}' <<<"$1"; } # trim leading/trailing spaces
+
 valid_email() {
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
-: "${LETSENCRYPT_EMAIL:=}"      # define (possibly empty) for set -u
-EMAIL="${LETSENCRYPT_EMAIL}"
-
 prompt_email_tty() {
-  local input=""
+  local input
   while true; do
-    read -rp "Enter a contact email for Let's Encrypt (required): " input < /dev/tty || true
-    input="${input:-}"
+    # shellcheck disable=SC2162
+    read -p "Enter a contact email for Let's Encrypt (required): " input < /dev/tty || true
+    input="$(trim "${input:-}")"
     if [[ -n "$input" ]] && valid_email "$input"; then
       printf '%s' "$input"
       return 0
@@ -51,8 +49,7 @@ prompt_email_tty() {
   done
 }
 
-# If env not set or invalid, try to prompt; otherwise error out on non-tty
-if [[ -z "$EMAIL" ]] || ! valid_email "$EMAIL"; then
+if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     EMAIL="$(prompt_email_tty)"
   else
