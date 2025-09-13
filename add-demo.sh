@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Improved demo: nginx hello-world behind nginx-proxy + acme-companion.
-# Prompts for DOMAIN (e.g., example.com) and SUBDOMAIN (e.g., demo) -> demo.example.com.
-# Works when piped because we reattach STDIN to /dev/tty if available.
-# Non-interactive usage is also supported via env:
-#   FQDN=demo.example.com LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh
-#   DOMAIN=example.com SUBDOMAIN=demo LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh
+# Prompts for DOMAIN (example.com) + SUBDOMAIN (demo) -> demo.example.com.
+# Works when piped: reattaches STDIN to /dev/tty or /dev/console if available.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -16,9 +13,13 @@ IMG_DEMO="nginx:alpine"
 NET="proxy"
 NAME_DEMO="demo-hello"
 
-# --- reattach STDIN to terminal if available (so read works when piped) ---
-if [[ -r /dev/tty ]]; then
-  exec </dev/tty
+# --- reattach STDIN to a real terminal if possible ---
+if [[ ! -t 0 ]]; then
+  if [[ -r /dev/tty ]]; then
+    exec </dev/tty
+  elif [[ -r /dev/console ]]; then
+    exec </dev/console
+  fi
 fi
 
 # --- sanity checks ---
@@ -37,11 +38,7 @@ valid_email()     { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ 
 prompt() {
   # $1=message  $2=default(optional)
   local msg="$1" def="${2:-}" in
-  if [[ -n "$def" ]]; then
-    printf "%s [%s]: " "$msg" "$def"
-  else
-    printf "%s: " "$msg"
-  fi
+  if [[ -n "$def" ]]; then printf "%s [%s]: " "$msg" "$def"; else printf "%s: " "$msg"; fi
   IFS= read -r in || in=""
   printf '%s' "$(sanitize "${in:-$def}")"
 }
