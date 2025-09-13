@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent setup of nginx-proxy + acme-companion using named volumes & a dedicated network.
-# Requires a contact email for Let's Encrypt; prompts via /dev/tty (works even when piped).
+# Fix: explicitly link acme-companion to nginx-proxy via label AND env var.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -36,7 +36,7 @@ sanitize() {
 
 valid_email() {
   # light but robust sanity check
-  printf '%s' "$1" | grep -Eqi '^[[:alnum:]._%%+\-]+@[[:alnum:].\-]+\.[[:alpha:]]{2,}$'
+  printf '%s' "$1" | grep -Eqi '^[[:alnum:]._%+\-]+@[[:alnum:].\-]+\.[[:alpha:]]{2,}$'
 }
 
 prompt_email_tty() {
@@ -110,6 +110,7 @@ docker pull "${IMG_PROXY}" >/dev/null || true
 docker pull "${IMG_ACME}"  >/dev/null || true
 
 # ---- (re)deploy nginx-proxy ----
+# Add the discovery label so acme-companion can auto-detect the proxy.
 recreate_container "${NAME_PROXY}" \
   -d \
   --name "${NAME_PROXY}" \
@@ -121,14 +122,17 @@ recreate_container "${NAME_PROXY}" \
   -v /var/run/docker.sock:/tmp/docker.sock:ro \
   --network "${NET}" \
   --label managed-by=setup-proxy.sh \
+  --label com.github.nginx-proxy.nginx=true \
   "${IMG_PROXY}"
 
 # ---- (re)deploy acme-companion (with REQUIRED email) ----
+# Also set NGINX_PROXY_CONTAINER explicitly as a belt-and-suspenders approach.
 recreate_container "${NAME_ACME}" \
   -d \
   --name "${NAME_ACME}" \
   --restart unless-stopped \
   -e "DEFAULT_EMAIL=${EMAIL}" \
+  -e "NGINX_PROXY_CONTAINER=${NAME_PROXY}" \
   -v "${VOL_CERTS}:/etc/nginx/certs" \
   -v "${VOL_VHOSTD}:/etc/nginx/vhost.d" \
   -v "${VOL_HTML}:/usr/share/nginx/html" \
@@ -151,6 +155,6 @@ Notes:
   • Ports 80 and 443 must be reachable from the Internet.
   • Certs and ACME state persist in volumes: ${VOL_CERTS}, ${VOL_ACME}.
 
-Next:
-  ./add-demo.sh   # to add a demo site (will prompt for domain/subdomain)
+Troubleshooting:
+  docker logs -f --since=10m nginx-proxy-acme
 EOF
