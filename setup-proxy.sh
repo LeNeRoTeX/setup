@@ -25,11 +25,11 @@ command -v docker >/dev/null 2>&1 || { err "Docker is required but not found."; 
 docker info >/dev/null 2>&1 || { err "Docker daemon not responding."; exit 1; }
 
 # ---- email handling (prompt via /dev/tty if needed) ----
-EMAIL=""                                 # initialize so set -u can't trip
-: "${LETSENCRYPT_EMAIL:=}"               # define (possibly empty) to satisfy -u
+EMAIL=""                          # initialize so 'set -u' can't trip
+: "${LETSENCRYPT_EMAIL:=}"        # define (possibly empty) to satisfy -u
 EMAIL="${LETSENCRYPT_EMAIL}"
 
-trim() { awk '{$1=$1; print}' <<<"$1"; } # trim leading/trailing spaces
+trim() { awk '{$1=$1; print}' <<<"$1"; }  # trim leading/trailing spaces
 
 valid_email() {
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
@@ -38,23 +38,22 @@ valid_email() {
 prompt_email_tty() {
   local input
   while true; do
-    # shellcheck disable=SC2162
-    read -p "Enter a contact email for Let's Encrypt (required): " input < /dev/tty || true
-    input="$(trim "${input:-}")"
+    printf "Enter a contact email for Let's Encrypt (required): " > /dev/tty
+    IFS= read -r input < /dev/tty || input=""
+    input="$(trim "${input}")"
     if [[ -n "$input" ]] && valid_email "$input"; then
       printf '%s' "$input"
       return 0
     fi
-    echo "Invalid or empty email. Please try again." > /dev/tty
+    echo "'${input}' is invalid. Please try again." > /dev/tty
   done
 }
 
-if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
+if [[ -z "$EMAIL" ]] || ! valid_email "$EMAIL"; then
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     EMAIL="$(prompt_email_tty)"
   else
-    err "A valid contact email is required, but no TTY is available for prompting.
-Set it via environment variable, e.g.:
+    err "Invalid or missing LETSENCRYPT_EMAIL: '${EMAIL}'. Supply a valid email, e.g.:
   LETSENCRYPT_EMAIL=you@example.com bash <(curl -fsSL https://raw.githubusercontent.com/LeNeRoTeX/setup/refs/heads/main/setup-proxy.sh)"
     exit 1
   fi
