@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Demo: nginx hello-world behind nginx-proxy + acme-companion.
-# Works with prompts (on a real TTY), or non-interactively via:
+# Improved demo: nginx hello-world behind nginx-proxy + acme-companion.
+# Works when piped (prompts via /dev/tty) and non-interactively via envs:
 #   FQDN=demo.example.com LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh
+# or:
 #   DOMAIN=example.com SUBDOMAIN=demo LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh
-#   ./add-demo.sh -f demo.example.com -e you@example.com
-#   ./add-demo.sh -d example.com -s demo -e you@example.com
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -26,82 +25,22 @@ docker ps --format '{{.Names}}' | grep -qx 'nginx-proxy-acme' || { err "acme-com
 # ---- helpers ----
 sanitize() { printf '%s' "$1" | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 valid_domain()    { [[ "$1" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]]; }
-valid_subdomain() { [[ "$1" =~ ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ ]]; }
+valid_subdomain() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; }  # <-- fixed: POSIX ERE groups
 valid_email()     { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
 
-usage() {
-  cat >&2 <<USAGE
-Usage:
-  add-demo.sh [-f FQDN] [-d DOMAIN -s SUBDOMAIN] [-e EMAIL]
-
-Examples:
-  FQDN=demo.example.com LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh
-  ./add-demo.sh -f demo.example.com -e you@example.com
-  ./add-demo.sh -d example.com -s demo -e you@example.com
-USAGE
-}
-
-# ---- inputs: flags -> env -> prompt ----
-FQDN="${FQDN:-}"
-DOMAIN="${DOMAIN:-}"
-SUBDOMAIN="${SUBDOMAIN:-}"
-LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
-
-while getopts ":f:d:s:e:h" opt; do
-  case "$opt" in
-    f) FQDN="$OPTARG" ;;
-    d) DOMAIN="$OPTARG" ;;
-    s) SUBDOMAIN="$OPTARG" ;;
-    e) LETSENCRYPT_EMAIL="$OPTARG" ;;
-    h) usage; exit 0 ;;
-    \?) err "Unknown flag: -$OPTARG"; usage; exit 1 ;;
-    :)  err "Flag -$OPTARG requires a value"; usage; exit 1 ;;
-  esac
-done
-
-FQDN="$(sanitize "${FQDN}")"
-DOMAIN="$(sanitize "${DOMAIN}")"
-SUBDOMAIN="$(sanitize "${SUBDOMAIN}")"
-EMAIL="$(sanitize "${LETSENCRYPT_EMAIL}")"
-
-# fetch default email from companion if not provided
-if [[ -z "$EMAIL" ]]; then
-  EMAIL="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' nginx-proxy-acme 2>/dev/null \
-     | awk -F= '/^DEFAULT_EMAIL=/{print $2; exit}' || true)"
-  EMAIL="$(sanitize "${EMAIL}")"
-fi
-
-# open a prompt fd if possible (for curl|bash)
-PROMPT_FD=""
-if [[ -t 0 ]]; then
-  PROMPT_FD=0
-elif [[ -r /dev/tty ]]; then
-  exec 3</dev/tty
-  PROMPT_FD=3
-elif [[ -r /dev/console ]]; then
-  exec 3</dev/console
-  PROMPT_FD=3
-fi
-
-prompt() {
+prompt_tty() {
   # $1=message $2=default(optional)
-  local msg="$1" def="${2:-}" in=""
-  if [[ -n "$def" ]]; then
-    printf "%s [%s]: " "$msg" "$def" >&2
-  else
-    printf "%s: " "$msg" >&2
-  fi
-  if [[ -n "$PROMPT_FD" ]]; then
-    IFS= read -r -u "$PROMPT_FD" in || in=""
-  else
-    err "No TTY available to prompt. Provide values via flags or env."
-    usage
-    exit 1
-  fi
+  local msg="$1" def="${2:-}" in
+  if [[ -n "$def" ]]; then printf "%s [%s]: " "$msg" "$def" > /dev/tty; else printf "%s: " "$msg" > /dev/tty; fi
+  IFS= read -r in < /dev/tty || in=""
   printf '%s' "$(sanitize "${in:-$def}")"
 }
 
-# FQDN / DOMAIN+SUBDOMAIN
+# ---- gather inputs (env → /dev/tty prompt) ----
+FQDN="$(sanitize "${FQDN:-}")"
+DOMAIN="$(sanitize "${DOMAIN:-}")"
+SUBDOMAIN="$(sanitize "${SUBDOMAIN:-}")"
+
 if [[ -n "$FQDN" ]]; then
   fq="${FQDN,,}"
   if ! valid_domain "$fq"; then err "FQDN='${FQDN}' is invalid. Use e.g. demo.example.com"; exit 1; fi
@@ -109,33 +48,68 @@ if [[ -n "$FQDN" ]]; then
   DOMAIN="${fq#${SUBDOMAIN}.}"
 else
   if [[ -z "$DOMAIN" ]]; then
-    DOMAIN="$(prompt "Enter your top-level domain (e.g., example.com)")"
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      while :; do
+        in="$(prompt_tty "Enter your top-level domain (e.g., example.com)")"
+        [[ -n "$in" ]] || { echo "Domain is required." > /dev/tty; continue; }
+        if valid_domain "$in"; then DOMAIN="${in,,}"; break; fi
+        echo "'$in' is invalid. Expected something like 'example.com'." > /dev/tty
+      done
+    else
+      err "DOMAIN or FQDN required (no TTY available to prompt). Example: DOMAIN=example.com SUBDOMAIN=demo ./add-demo.sh"
+      exit 1
+    fi
+  elif ! valid_domain "$DOMAIN"; then
+    err "DOMAIN='${DOMAIN}' is invalid. Use e.g. example.com"
+    exit 1
+  else
+    DOMAIN="${DOMAIN,,}"
   fi
-  DOMAIN="${DOMAIN,,}"
-  if ! valid_domain "$DOMAIN"; then err "'$DOMAIN' is invalid. Expected something like 'example.com'."; exit 1; fi
-
   if [[ -z "$SUBDOMAIN" ]]; then
-    SUBDOMAIN="$(prompt 'Enter your subdomain (e.g., demo)')"
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      while :; do
+        in="$(prompt_tty "Enter your subdomain (e.g., demo)")"
+        [[ -n "$in" ]] || { echo "Subdomain is required." > /dev/tty; continue; }
+        if valid_subdomain "$in"; then SUBDOMAIN="${in,,}"; break; fi
+        echo "'$in' is invalid. Use lowercase letters/numbers/hyphens (no leading/trailing '-')." > /dev/tty
+      done
+    else
+      err "SUBDOMAIN or FQDN required (no TTY available to prompt). Example: DOMAIN=example.com SUBDOMAIN=demo ./add-demo.sh"
+      exit 1
+    fi
+  elif ! valid_subdomain "$SUBDOMAIN"; then
+    err "SUBDOMAIN='${SUBDOMAIN}' is invalid."
+    exit 1
+  else
+    SUBDOMAIN="${SUBDOMAIN,,}"
   fi
-  SUBDOMAIN="${SUBDOMAIN,,}"
-  if ! valid_subdomain "$SUBDOMAIN"; then err "'$SUBDOMAIN' is invalid. Use lowercase letters/numbers/hyphens (no leading/trailing '-')."; exit 1; fi
 fi
 
 FQDN="${SUBDOMAIN}.${DOMAIN}"
 
-# Email
-if [[ -z "$EMAIL" ]]; then
-  EMAIL="$(prompt "Enter Let's Encrypt email (required)")"
+# Email: try companion DEFAULT_EMAIL → env → prompt
+ACME_EMAIL="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' nginx-proxy-acme 2>/dev/null | awk -F= '/^DEFAULT_EMAIL=/{print $2; exit}' || true)"
+: "${LETSENCRYPT_EMAIL:=${ACME_EMAIL:-}}"
+EMAIL="$(sanitize "${LETSENCRYPT_EMAIL}")"
+if [[ -z "$EMAIL" || ! valid_email "$EMAIL" ]]; then
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    while :; do
+      in="$(prompt_tty "Enter Let's Encrypt email (required)" "${EMAIL}")"
+      if valid_email "$in"; then EMAIL="$in"; break; fi
+      echo "'$in' is invalid. Please enter a valid email (e.g., you@example.com)." > /dev/tty
+    done
+  else
+    err "LETSENCRYPT_EMAIL is required (no TTY to prompt). Example:
+  FQDN=${FQDN} LETSENCRYPT_EMAIL=you@example.com ./add-demo.sh"
+    exit 1
+  fi
 fi
-if ! valid_email "$EMAIL"; then err "'$EMAIL' is invalid (e.g., you@example.com)."; exit 1; fi
 
 log "FQDN: ${FQDN}"
 log "Email: ${EMAIL}"
 
-# ---- pull image (best-effort) ----
 docker pull "${IMG_DEMO}" >/dev/null || true
 
-# ---- (re)deploy ----
 if docker ps -a --format '{{.Names}}' | grep -qx "${NAME_DEMO}"; then
   log "Recreating ${NAME_DEMO}..."
   docker rm -f "${NAME_DEMO}" >/dev/null || true
@@ -192,12 +166,4 @@ cat <<EOF
 DNS & firewall checklist for automatic TLS:
   • Create an A/AAAA record: ${FQDN} -> your server's public IP
   • Ensure TCP 80 and 443 are open
-
-Quick tests (after DNS propagates):
-  curl -I http://${FQDN}
-  curl -I https://${FQDN}
-  curl -s https://${FQDN}/health
-
-Re-run to change domain/subdomain/email, or remove with:
-  docker rm -f ${NAME_DEMO}
 EOF
