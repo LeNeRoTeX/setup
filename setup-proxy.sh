@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent setup of nginx-proxy + acme-companion using named volumes & a dedicated network.
-# Requires a contact email for Let's Encrypt notifications.
+# Requires a contact email for Let's Encrypt notifications; will prompt via /dev/tty even when piped.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -30,27 +30,35 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# ---- require a contact email ----
+# ---- require a contact email (prompt via /dev/tty if needed) ----
 : "${LETSENCRYPT_EMAIL:=}"  # define (possibly empty) to satisfy 'set -u'
 EMAIL="${LETSENCRYPT_EMAIL}"
 
 valid_email() {
-  # Simple sanity check; not exhaustive but catches most mistakes
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
-if [[ -t 0 ]]; then
-  # Interactive: keep prompting until valid
-  while [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; do
-    [[ -n "${EMAIL}" ]] && echo "Invalid email: '${EMAIL}'. Try again."
-    read -rp "Enter a contact email for Let's Encrypt (required): " EMAIL_INPUT || true
-    EMAIL="${EMAIL_INPUT:-}"
+prompt_email_tty() {
+  local input=""
+  while true; do
+    # Read from the user's terminal directly (works even when script is piped)
+    read -rp "Enter a contact email for Let's Encrypt (required): " input < /dev/tty || true
+    input="${input:-}"
+    if [[ -n "$input" && $(valid_email "$input") ]]; then
+      printf '%s' "$input"
+      return 0
+    fi
+    echo "Invalid or empty email. Please try again." > /dev/tty
   done
-else
-  # Non-interactive: require LETSENCRYPT_EMAIL env
-  if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
-    err "A valid contact email is required. Run interactively or set LETSENCRYPT_EMAIL env, e.g.:"
-    err "  LETSENCRYPT_EMAIL=you@example.com bash setup-proxy.sh"
+}
+
+if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    EMAIL="$(prompt_email_tty)"
+  else
+    err "A valid contact email is required but no TTY is available for prompting.
+Set it via environment variable, e.g.:
+  LETSENCRYPT_EMAIL=you@example.com bash <(curl -fsSL https://raw.githubusercontent.com/LeNeRoTeX/setup/refs/heads/main/setup-proxy.sh)"
     exit 1
   fi
 fi
