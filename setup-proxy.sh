@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sets up nginx-proxy + acme-companion with named volumes & a dedicated network.
-# Ports 80/443 must be reachable from the Internet.
+# Idempotent setup of nginx-proxy + acme-companion using named volumes & a dedicated network.
+# Requires a contact email for Let's Encrypt notifications.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -8,7 +8,6 @@ IFS=$'\n\t'
 log(){ echo "[+] $*"; }
 err(){ echo "ERROR: $*" >&2; }
 
-# ---- images / names / resources ----
 IMG_PROXY="nginxproxy/nginx-proxy:latest"
 IMG_ACME="nginxproxy/acme-companion:latest"
 
@@ -21,42 +20,89 @@ VOL_ACME="np-acme"
 NAME_PROXY="nginx-proxy"
 NAME_ACME="nginx-proxy-acme"
 
-# ---- sanity checks ----
+# ---- sanity: docker available ----
 if ! command -v docker >/dev/null 2>&1; then
-  err "Docker is required but not found. Install Docker and re-run."
+  err "Docker is required but not found."
   exit 1
 fi
 if ! docker info >/dev/null 2>&1; then
-  err "Docker daemon not responding. Start Docker and re-run."
+  err "Docker daemon not responding."
   exit 1
 fi
 
-# ---- ask for optional default email for ACME ----
-read -rp "Enter a contact email for Let's Encrypt (optional, press Enter to skip): " EMAIL_INPUT
-EMAIL="${EMAIL_INPUT:-}"
+# ---- require a contact email ----
+: "${LETSENCRYPT_EMAIL:=}"  # define (possibly empty) to satisfy 'set -u'
+EMAIL="${LETSENCRYPT_EMAIL}"
 
-# ---- network & volumes ----
-log "Creating network '${NET}' (ok if exists)..."
-docker network inspect "${NET}" >/dev/null 2>&1 || docker network create "${NET}" >/dev/null
+valid_email() {
+  # Simple sanity check; not exhaustive but catches most mistakes
+  [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
+}
 
-log "Creating named volumes (ok if exist)..."
-docker volume create "${VOL_CERTS}"  >/dev/null
-docker volume create "${VOL_HTML}"   >/dev/null
-docker volume create "${VOL_VHOSTD}" >/dev/null
-docker volume create "${VOL_ACME}"   >/dev/null
+if [[ -t 0 ]]; then
+  # Interactive: keep prompting until valid
+  while [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; do
+    [[ -n "${EMAIL}" ]] && echo "Invalid email: '${EMAIL}'. Try again."
+    read -rp "Enter a contact email for Let's Encrypt (required): " EMAIL_INPUT || true
+    EMAIL="${EMAIL_INPUT:-}"
+  done
+else
+  # Non-interactive: require LETSENCRYPT_EMAIL env
+  if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
+    err "A valid contact email is required. Run interactively or set LETSENCRYPT_EMAIL env, e.g.:"
+    err "  LETSENCRYPT_EMAIL=you@example.com bash setup-proxy.sh"
+    exit 1
+  fi
+fi
 
-# ---- pull images (best-effort) ----
+# ---- helpers ----
+ensure_network() {
+  local net="$1"
+  if ! docker network inspect "$net" >/dev/null 2>&1; then
+    log "Creating network '$net'..."
+    docker network create "$net" >/dev/null
+  else
+    log "Network '$net' exists."
+  fi
+}
+
+ensure_volume() {
+  local vol="$1"
+  if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+    log "Creating volume '$vol'..."
+    docker volume create "$vol" >/dev/null
+  else
+    log "Volume '$vol' exists."
+  fi
+}
+
+recreate_container() {
+  local name="$1"; shift
+  if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+    log "Recreating container '$name'..."
+    docker rm -f "$name" >/dev/null || true
+  else
+    log "Creating container '$name'..."
+  fi
+  # shellcheck disable=SC2068
+  docker run $@ >/dev/null
+}
+
+# ---- ensure resources ----
+ensure_network "${NET}"
+ensure_volume "${VOL_CERTS}"
+ensure_volume "${VOL_HTML}"
+ensure_volume "${VOL_VHOSTD}"
+ensure_volume "${VOL_ACME}"
+
+# ---- pull images (best effort) ----
 log "Pulling images (may use cache)..."
 docker pull "${IMG_PROXY}" >/dev/null || true
 docker pull "${IMG_ACME}"  >/dev/null || true
 
 # ---- (re)deploy nginx-proxy ----
-if docker ps -a --format '{{.Names}}' | grep -qx "${NAME_PROXY}"; then
-  log "Recreating ${NAME_PROXY}..."
-  docker rm -f "${NAME_PROXY}" >/dev/null || true
-fi
-log "Starting ${NAME_PROXY}..."
-docker run -d \
+recreate_container "${NAME_PROXY}" \
+  -d \
   --name "${NAME_PROXY}" \
   --restart unless-stopped \
   -p 80:80 -p 443:443 \
@@ -65,49 +111,37 @@ docker run -d \
   -v "${VOL_HTML}:/usr/share/nginx/html" \
   -v /var/run/docker.sock:/tmp/docker.sock:ro \
   --network "${NET}" \
-  "${IMG_PROXY}" >/dev/null
+  --label managed-by=setup-proxy.sh \
+  "${IMG_PROXY}"
 
-# ---- (re)deploy acme-companion ----
-if docker ps -a --format '{{.Names}}' | grep -qx "${NAME_ACME}"; then
-  log "Recreating ${NAME_ACME}..."
-  docker rm -f "${NAME_ACME}" >/dev/null || true
-fi
+# ---- (re)deploy acme-companion (with REQUIRED email) ----
+recreate_container "${NAME_ACME}" \
+  -d \
+  --name "${NAME_ACME}" \
+  --restart unless-stopped \
+  -e "DEFAULT_EMAIL=${EMAIL}" \
+  -v "${VOL_CERTS}:/etc/nginx/certs" \
+  -v "${VOL_VHOSTD}:/etc/nginx/vhost.d" \
+  -v "${VOL_HTML}:/usr/share/nginx/html" \
+  -v "${VOL_ACME}:/etc/acme.sh" \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  --network "${NET}" \
+  --label managed-by=setup-proxy.sh \
+  "${IMG_ACME}"
 
-log "Starting ${NAME_ACME} (Let's Encrypt companion)..."
-if [[ -n "${EMAIL}" ]]; then
-  docker run -d \
-    --name "${NAME_ACME}" \
-    --restart unless-stopped \
-    -e "DEFAULT_EMAIL=${EMAIL}" \
-    -v "${VOL_CERTS}:/etc/nginx/certs" \
-    -v "${VOL_VHOSTD}:/etc/nginx/vhost.d" \
-    -v "${VOL_HTML}:/usr/share/nginx/html" \
-    -v "${VOL_ACME}:/etc/acme.sh" \
-    -v /var/run/docker.sock:/var/run/docker.sock:ro \
-    --network "${NET}" \
-    "${IMG_ACME}" >/dev/null
-else
-  docker run -d \
-    --name "${NAME_ACME}" \
-    --restart unless-stopped \
-    -v "${VOL_CERTS}:/etc/nginx/certs" \
-    -v "${VOL_VHOSTD}:/etc/nginx/vhost.d" \
-    -v "${VOL_HTML}:/usr/share/nginx/html" \
-    -v "${VOL_ACME}:/etc/acme.sh" \
-    -v /var/run/docker.sock:/var/run/docker.sock:ro \
-    --network "${NET}" \
-    "${IMG_ACME}" >/dev/null
-fi
-
-log "Stack is up."
+log "Stack state:"
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
-cat <<'EOF'
+cat <<EOF
 
-[INFO] Next step: run ./add-demo.sh to add a demo site behind the proxy.
+[OK] nginx-proxy + acme-companion are running.
+Contact email: ${EMAIL}
 
-Tips:
-  - Make sure TCP 80 & 443 are open to the Internet.
-  - Certs & ACME state persist in named volumes (np-certs, np-acme).
-  - To update the default ACME email, recreate the acme container with DEFAULT_EMAIL.
+Notes:
+  • Re-run this script any time; it's idempotent and converges state.
+  • Ports 80 and 443 must be reachable from the Internet.
+  • Certs and ACME state persist in volumes: ${VOL_CERTS}, ${VOL_ACME}.
+
+Next:
+  ./add-demo.sh   # to add a demo site (will prompt for domain/subdomain)
 EOF
