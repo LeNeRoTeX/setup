@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install Sysbox runtime and Docker CE on Debian/Ubuntu in strict mode
-# and set Sysbox as the default Docker runtime.
+# and set Sysbox as the default Docker runtime (including systemd override fix).
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -103,13 +103,12 @@ install -m 0755 -d /etc/apt/keyrings
 curl -fsSL "https://download.docker.com/linux/debian/gpg" -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 
-# Determine codename (Ubuntu uses VERSION_CODENAME; Debian too)
+# Determine codename (Ubuntu & Debian)
 CODENAME="$(
   . /etc/os-release
   echo "${VERSION_CODENAME:-}"
 )"
 if [[ -z "${CODENAME}" ]]; then
-  # Fallback for some Debian derivatives
   CODENAME="$(awk -F'[= "]' '/VERSION=/ {print tolower($NF)}' /etc/os-release || true)"
 fi
 if [[ -z "${CODENAME}" ]]; then
@@ -139,9 +138,7 @@ if [[ -e "${DAEMON_JSON}" ]]; then
   log "Existing daemon.json backed up to ${BACKUP}"
 fi
 
-# Ensure jq is present (we installed it above), then merge:
-# - add/ensure runtimes.sysbox-runc.path = /usr/bin/sysbox-runc
-# - set default-runtime = "sysbox-runc"
+# Merge or create daemon.json
 if [[ -s "${DAEMON_JSON}" ]]; then
   TMP_JSON="$(mktemp)"
   if jq '
@@ -172,6 +169,27 @@ else
 EOF
 fi
 
+# ---------- systemd override fix (remove any --default-runtime=runc) ----------
+if has_systemctl; then
+  log "Ensuring systemd unit does not force '--default-runtime runc'..."
+  mkdir -p /etc/systemd/system/docker.service.d
+
+  # Build ExecStart similar to package default, but without any default-runtime flag.
+  DOCKERD="/usr/bin/dockerd"
+  DOCKERD_OPTS="-H fd://"
+  if [[ -S /run/containerd/containerd.sock ]]; then
+    DOCKERD_OPTS+=" --containerd=/run/containerd/containerd.sock"
+  fi
+
+  cat >/etc/systemd/system/docker.service.d/override.conf <<EOF
+[Service]
+# Reset ExecStart defined by the packaged unit
+ExecStart=
+# Start dockerd without forcing a default-runtime; it will honor /etc/docker/daemon.json
+ExecStart=${DOCKERD} ${DOCKERD_OPTS}
+EOF
+fi
+
 # ---------- reload/restart daemon ----------
 if has_systemctl; then
   log "Reloading systemd units..."
@@ -195,8 +213,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# Print concise info first; fall back to full info if templating unsupported
-if ! docker info --format $'Default runtime: {{.DefaultRuntime}}\nAvailable runtimes: {{json .Runtimes}}'; then
+# Short summary (prints default and runtimes); fallback to full info if templating unsupported
+if ! docker info --format $'Default runtime: {{.DefaultRuntime}}\nRuntimes: {{range $k,$v := .Runtimes}}{{printf "%s " $k}}{{end}}\nInit Binary: {{.InitBinary}}\ncontainerd version: {{.ContainerdVersion}}'; then
   log "Falling back to full 'docker info' output:"
   docker info || true
 fi
