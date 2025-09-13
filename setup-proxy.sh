@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent setup of nginx-proxy + acme-companion using named volumes & a dedicated network.
-# Requires a contact email for Let's Encrypt notifications; will prompt via /dev/tty even when piped.
+# Requires a contact email for Let's Encrypt notifications; prompts via /dev/tty when piped.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -30,21 +30,20 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# ---- require a contact email (prompt via /dev/tty if needed) ----
-: "${LETSENCRYPT_EMAIL:=}"  # define (possibly empty) to satisfy 'set -u'
-EMAIL="${LETSENCRYPT_EMAIL}"
-
+# ---- email handling (prompt via /dev/tty if needed) ----
 valid_email() {
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
+: "${LETSENCRYPT_EMAIL:=}"      # define (possibly empty) for set -u
+EMAIL="${LETSENCRYPT_EMAIL}"
+
 prompt_email_tty() {
   local input=""
   while true; do
-    # Read from the user's terminal directly (works even when script is piped)
     read -rp "Enter a contact email for Let's Encrypt (required): " input < /dev/tty || true
     input="${input:-}"
-    if [[ -n "$input" && $(valid_email "$input") ]]; then
+    if [[ -n "$input" ]] && valid_email "$input"; then
       printf '%s' "$input"
       return 0
     fi
@@ -52,11 +51,12 @@ prompt_email_tty() {
   done
 }
 
-if [[ -z "${EMAIL}" || ! $(valid_email "${EMAIL}") ]]; then
+# If env not set or invalid, try to prompt; otherwise error out on non-tty
+if [[ -z "$EMAIL" ]] || ! valid_email "$EMAIL"; then
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     EMAIL="$(prompt_email_tty)"
   else
-    err "A valid contact email is required but no TTY is available for prompting.
+    err "A valid contact email is required, but no TTY is available for prompting.
 Set it via environment variable, e.g.:
   LETSENCRYPT_EMAIL=you@example.com bash <(curl -fsSL https://raw.githubusercontent.com/LeNeRoTeX/setup/refs/heads/main/setup-proxy.sh)"
     exit 1
