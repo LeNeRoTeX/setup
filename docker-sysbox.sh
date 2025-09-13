@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Install Sysbox runtime and Docker CE on Debian/Ubuntu in strict mode
+# and set Sysbox as the default Docker runtime.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -126,28 +127,47 @@ apt-get update -o Acquire::Retries=3
 log "Installing Docker Engine, CLI, containerd, Buildx, and Compose plugin..."
 apt-get install "${APT_FLAGS[@]}" docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# ---------- configure Docker to use Sysbox runtime ----------
-log "Configuring Docker daemon to register 'sysbox-runc' runtime..."
+# ---------- configure Docker to use Sysbox runtime (and set it as default) ----------
+log "Configuring Docker daemon to register 'sysbox-runc' and set it as default..."
 install -d -m 0755 /etc/docker
 DAEMON_JSON="/etc/docker/daemon.json"
+BACKUP="/etc/docker/daemon.json.bak.$(date +%s)"
 
-# Merge-friendly write: if a daemon.json exists, we patch it to add runtimes.sysbox-runc.
+# Back up existing config if present (even empty)
+if [[ -e "${DAEMON_JSON}" ]]; then
+  cp -a "${DAEMON_JSON}" "${BACKUP}" || true
+  log "Existing daemon.json backed up to ${BACKUP}"
+fi
+
+# Ensure jq is present (we installed it above), then merge:
+# - add/ensure runtimes.sysbox-runc.path = /usr/bin/sysbox-runc
+# - set default-runtime = "sysbox-runc"
 if [[ -s "${DAEMON_JSON}" ]]; then
-  # Minimal, jq-based merge to avoid clobbering existing config.
   TMP_JSON="$(mktemp)"
-  jq '
-    .runtimes = (.runtimes // {}) |
-    .runtimes["sysbox-runc"] = {"path":"/usr/bin/sysbox-runc"}
-  ' "${DAEMON_JSON}" > "${TMP_JSON}"
-  mv "${TMP_JSON}" "${DAEMON_JSON}"
+  if jq '
+      .runtimes = (.runtimes // {}) |
+      .runtimes["sysbox-runc"] = {"path":"/usr/bin/sysbox-runc"} |
+      .["default-runtime"] = "sysbox-runc"
+    ' "${DAEMON_JSON}" > "${TMP_JSON}"; then
+    mv "${TMP_JSON}" "${DAEMON_JSON}"
+  else
+    err "daemon.json contains invalid JSON; writing a fresh config."
+    tee "${DAEMON_JSON}" >/dev/null <<'EOF'
+{
+  "runtimes": {
+    "sysbox-runc": { "path": "/usr/bin/sysbox-runc" }
+  },
+  "default-runtime": "sysbox-runc"
+}
+EOF
+  fi
 else
   tee "${DAEMON_JSON}" >/dev/null <<'EOF'
 {
   "runtimes": {
-    "sysbox-runc": {
-      "path": "/usr/bin/sysbox-runc"
-    }
-  }
+    "sysbox-runc": { "path": "/usr/bin/sysbox-runc" }
+  },
+  "default-runtime": "sysbox-runc"
 }
 EOF
 fi
@@ -168,5 +188,17 @@ else
   fi
 fi
 
-log "Done. Docker is configured with the 'sysbox-runc' runtime."
-log "You can verify with: docker info | grep -A3 Runtimes"
+# ---------- final verification ----------
+log "Verifying Docker runtime configuration..."
+if ! command -v docker >/dev/null 2>&1; then
+  err "docker command not found after installation."
+  exit 1
+fi
+
+# Print concise info first; fall back to full info if templating unsupported
+if ! docker info --format $'Default runtime: {{.DefaultRuntime}}\nAvailable runtimes: {{json .Runtimes}}'; then
+  log "Falling back to full 'docker info' output:"
+  docker info || true
+fi
+
+log "Done. Docker should now use 'sysbox-runc' as the default runtime."
