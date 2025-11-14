@@ -35,7 +35,7 @@ echo "Created $LINK_FILE"
 echo "=== Updating NetworkManager connection profiles ==="
 
 # Find the NM connection that matches the current interface
-CON_NAME=$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v if="$PRIMARY_IF" '$2==if {print $1}')
+CON_NAME=$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v DEV="$PRIMARY_IF" '$2==DEV {print $1}')
 
 if [[ -z "$CON_NAME" ]]; then
     echo "WARNING: No matching NetworkManager connection found for $PRIMARY_IF"
