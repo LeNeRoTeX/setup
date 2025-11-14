@@ -1,26 +1,19 @@
 #!/usr/bin/env bash
 set -e
 
-echo "=== Detecting primary network interface ==="
+echo "=== Preparing safe NIC rename for Rocky Linux 9 ==="
 
-PRIMARY_IF=$(ip route | awk '/default/ {print $5; exit}')
-if [[ -z "$PRIMARY_IF" ]]; then
-    echo "ERROR: Could not detect primary interface. Aborting."
-    exit 1
-fi
-
-echo "Primary detected NIC: $PRIMARY_IF"
-
+# Detect active interface
+PRIMARY_IF=$(ip route get 8.8.8.8 | awk '/dev/ {print $5; exit}')
 MAC=$(cat /sys/class/net/$PRIMARY_IF/address)
-echo "MAC address: $MAC"
 
-echo "=== Ensuring systemd network directory exists ==="
+echo "Detected active NIC: $PRIMARY_IF"
+echo "MAC: $MAC"
+
+echo "Creating systemd .link file..."
 mkdir -p /etc/systemd/network
 
-echo "=== Creating systemd .link override ==="
-LINK_FILE="/etc/systemd/network/10-eth0.link"
-
-cat > "$LINK_FILE" <<EOF
+cat > /etc/systemd/network/10-eth0.link <<EOF
 [Match]
 MACAddress=$MAC
 
@@ -28,45 +21,21 @@ MACAddress=$MAC
 Name=eth0
 EOF
 
-echo "Created $LINK_FILE"
+echo "Creating NEW NetworkManager profile for eth0 (does NOT touch current one)..."
 
-echo "=== Updating NetworkManager connection profiles ==="
+# Create a new profile for eth0 but don't activate it
+nmcli con add type ethernet ifname eth0 con-name eth0 autoconnect yes || true
 
-# FIXED AWK VARIABLE NAME
-CON_NAME=$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v DEV="$PRIMARY_IF" '$2==DEV {print $1}')
-
-if [[ -z "$CON_NAME" ]]; then
-    echo "WARNING: No matching NetworkManager connection found for $PRIMARY_IF"
-    echo "Available profiles:"
-    nmcli connection show
-    echo
-    echo "You may need to modify the correct profile manually."
-else
-    echo "NetworkManager connection found: $CON_NAME"
-
-    echo " - Setting interface-name to eth0"
-    nmcli con mod "$CON_NAME" connection.interface-name eth0
-
-    echo " - Renaming profile to 'eth0'"
-    nmcli con mod "$CON_NAME" connection.id eth0 || true
-fi
-
-echo "=== Rebuilding initramfs ==="
+echo "Rebuilding initramfs (safe)..."
 dracut -f
 
-echo "=== Restarting NetworkManager ==="
-systemctl restart NetworkManager || true
-
+echo "=== SAFE STAGE COMPLETE ==="
+echo "Your current SSH session is untouched."
 echo
-echo "===================================================="
-echo " NIC renaming is configured!"
-echo " After reboot, your interface will be: eth0"
-echo "===================================================="
+echo "After REBOOT, the system will:"
+echo "  ✔ Rename NIC to eth0"
+echo "  ✔ Auto-connect using the new eth0 profile"
 echo
-
-read -p "Reboot now? (y/n): " ANSWER
-if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
-    reboot
-else
-    echo "Please reboot manually when ready."
-fi
+echo "You can reboot when ready."
+echo
+echo "Run: sudo reboot"
