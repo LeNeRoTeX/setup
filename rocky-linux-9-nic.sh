@@ -3,7 +3,6 @@ set -e
 
 echo "=== Detecting primary network interface ==="
 
-# Detect the main NIC (non-loopback, with default route)
 PRIMARY_IF=$(ip route | awk '/default/ {print $5; exit}')
 if [[ -z "$PRIMARY_IF" ]]; then
     echo "ERROR: Could not detect primary interface. Aborting."
@@ -12,7 +11,6 @@ fi
 
 echo "Primary detected NIC: $PRIMARY_IF"
 
-# Extract MAC address
 MAC=$(cat /sys/class/net/$PRIMARY_IF/address)
 echo "MAC address: $MAC"
 
@@ -34,7 +32,7 @@ echo "Created $LINK_FILE"
 
 echo "=== Updating NetworkManager connection profiles ==="
 
-# Find the NM connection that matches the current interface
+# FIXED AWK VARIABLE NAME
 CON_NAME=$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v DEV="$PRIMARY_IF" '$2==DEV {print $1}')
 
 if [[ -z "$CON_NAME" ]]; then
@@ -42,7 +40,7 @@ if [[ -z "$CON_NAME" ]]; then
     echo "Available profiles:"
     nmcli connection show
     echo
-    echo "You may need to update the appropriate profile manually."
+    echo "You may need to modify the correct profile manually."
 else
     echo "NetworkManager connection found: $CON_NAME"
 
@@ -56,7 +54,7 @@ fi
 echo "=== Rebuilding initramfs ==="
 dracut -f
 
-echo "=== Restarting NetworkManager (may temporarily disrupt network) ==="
+echo "=== Restarting NetworkManager ==="
 systemctl restart NetworkManager || true
 
 echo
