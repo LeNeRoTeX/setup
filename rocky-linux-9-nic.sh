@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "=== Safe NIC rename preparation for Rocky Linux 9 (Hetzner) ==="
+echo "=== SAFE NIC RENAME (Hetzner Rocky 9) ==="
 
 # Detect active interface
 PRIMARY_IF=$(ip route get 1.1.1.1 | awk '/dev/ {print $5; exit}')
@@ -10,15 +10,28 @@ if [[ -z "$PRIMARY_IF" ]]; then
     exit 1
 fi
 
-MAC=$(cat /sys/class/net/$PRIMARY_IF/address)
+MAC=$(cat /sys/class/net/${PRIMARY_IF}/address)
 
-echo "Active NIC  : $PRIMARY_IF"
-echo "MAC Address : $MAC"
+# Detect network config of primary interface
+IP_ADDR=$(ip -4 -o addr show dev "$PRIMARY_IF" | awk '{print $4}')
+GATEWAY=$(ip route | awk '/default/ {print $3}')
+DNS=$(grep -E '^nameserver' /etc/resolv.conf | head -n1 | awk '{print $2}')
+
+if [[ -z "$IP_ADDR" || -z "$GATEWAY" ]]; then
+    echo "ERROR: Could not detect full IP configuration."
+    exit 1
+fi
+
+echo "Active NIC : $PRIMARY_IF"
+echo "MAC        : $MAC"
+echo "IP         : $IP_ADDR"
+echo "Gateway    : $GATEWAY"
+echo "DNS        : $DNS"
 echo
 
-# Create systemd .link file safely
 mkdir -p /etc/systemd/network
 
+# Systemd link file for rename
 cat > /etc/systemd/network/10-eth0.link <<EOF
 [Match]
 MACAddress=$MAC
@@ -27,25 +40,30 @@ MACAddress=$MAC
 Name=eth0
 EOF
 
-echo "Created /etc/systemd/network/10-eth0.link"
+echo "Created NIC rename file: /etc/systemd/network/10-eth0.link"
 echo
 
-# Create new NetworkManager profile for eth0 WITHOUT touching the active one
-echo "Creating NetworkManager eth0 profile (safe, non-destructive)..."
-nmcli con add type ethernet ifname eth0 con-name eth0 autoconnect yes || true
-echo "NM profile created."
+# Create *correct* NetworkManager profile for eth0
+echo "Creating eth0 NetworkManager profile with current IP..."
+nmcli con add type ethernet ifname eth0 con-name eth0 autoconnect yes \
+    ip4 "$IP_ADDR" gw4 "$GATEWAY"
+
+if [[ -n "$DNS" ]]; then
+    nmcli con mod eth0 ipv4.dns "$DNS"
+fi
+
+# Make it manual (static IP)
+nmcli con mod eth0 ipv4.method manual
+
+echo "eth0 NetworkManager profile created:"
+nmcli con show eth0
 echo
 
-# DO NOT DOWN NM
-# DO NOT RESTART NM
-# DO NOT MODIFY ACTIVE CONNECTION
-
-# Rebuild initramfs so rename applies at next boot
+# Rebuild initramfs with rename rule included
 echo "Rebuilding initramfs..."
 dracut -f
 echo
 
-echo "=== SAFE STAGE COMPLETE ==="
-echo "Your current SSH session is untouched."
-echo "Reboot the machine when ready to apply the eth0 rename."
-echo "Run manually: sudo reboot"
+echo "=== DONE ==="
+echo "Reboot now to switch NIC from $PRIMARY_IF → eth0"
+echo "Run: sudo reboot"
